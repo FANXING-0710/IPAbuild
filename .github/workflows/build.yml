@@ -1,0 +1,58 @@
+name: Build IPA and commit back
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'IOGPUProbe/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-ipa:
+    runs-on: macos-latest
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 编译 IOGPUProbe (arm64e)
+      run: |
+        mkdir -p Payload/IOGPUProbe.app
+        xcrun --sdk iphoneos clang -arch arm64e \
+          -miphoneos-version-min=16.0 \
+          -fobjc-arc \
+          -framework UIKit \
+          -framework Foundation \
+          -framework IOKit \
+          IOGPUProbe/main.m \
+          -o Payload/IOGPUProbe.app/IOGPUProbe
+
+    - name: 复制描述文件并打包 IPA
+      run: |
+        cp IOGPUProbe/Info.plist Payload/IOGPUProbe.app/
+        cp IOGPUProbe/Entitlements.plist Payload/IOGPUProbe.app/
+        zip -r IOGPUProbe.ipa Payload
+
+    - name: 回传提交 IPA 到仓库 (dist/)
+      run: |
+        mkdir -p dist
+        cp IOGPUProbe.ipa dist/IOGPUProbe.ipa
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add dist/IOGPUProbe.ipa
+        if git diff --cached --quiet; then
+          echo "IPA 无变化，跳过提交"
+        else
+          git commit -m "build: update IOGPUProbe.ipa"
+          git push
+        fi
+
+    - name: 上传 IPA 构建产物
+      uses: actions/upload-artifact@v4
+      with:
+        name: IOGPUProbe-ipa
+        path: IOGPUProbe.ipa
