@@ -111,40 +111,31 @@ static pthread_mutex_t gLogLock = PTHREAD_MUTEX_INITIALIZER;
 
 // ---------------- Phase A: new_resource 可达性 ----------------
 - (void)testNewResourceReachability:(io_connect_t)connect {
-    [self appendLog:@"\n[*] Phase A: 连接扫描 (service x type) - 定位真正的 IOGPU UserClient"];
-    const char *services[] = {"AGXAcceleratorG17G", "AGXAccelerator", NULL};
-    for (int si = 0; services[si] != NULL; si++) {
-        const char *svcName = services[si];
-        io_service_t svc = IOServiceGetMatchingService(0, IOServiceMatching(svcName));
-        if (!svc) {
-            [self appendLog:[NSString stringWithFormat:@"[-] 服务 %s 不存在", svcName]];
-            continue;
-        }
-        [self appendLog:[NSString stringWithFormat:@"[i] 服务 %s:", svcName]];
-        for (uint32_t type = 0; type <= 9; type++) {
-            io_connect_t c = 0;
-            kern_return_t kr = IOServiceOpen(svc, mach_task_self(), type, &c);
-            if (kr != kIOReturnSuccess) {
-                if (type <= 2)
-                    [self appendLog:[NSString stringWithFormat:@"    type%u IOServiceOpen -> %@", type, [self krName:kr]]];
-                continue;
-            }
-            // 对成功连接测 sel0 / sel2
-            uint8_t qin[0x408] = {0}; memset(qin, 0x01, 0x30); *(uint64_t*)(qin+0x30)=0x1000;
-            uint8_t qout[0x10] = {0}; size_t qos = sizeof(qout);
-            kern_return_t kr0 = IOConnectCallStructMethod(c, 0, qin, sizeof(qin), qout, &qos);
+    [self appendLog:@"\n[*] Phase A: type1 全 selector 扫描 (0-63) - 映射真实方法空间"];
+    io_service_t svc = IOServiceGetMatchingService(0, IOServiceMatching("AGXAcceleratorG17G"));
+    if (!svc) { [self appendLog:@"[-] 服务不存在"]; return; }
+    io_connect_t c = 0;
+    kern_return_t okr = IOServiceOpen(svc, mach_task_self(), 1, &c);
+    IOObjectRelease(svc);
+    if (okr != kIOReturnSuccess) { [self appendLog:@"[-] type1 打开失败"]; return; }
+    [self appendLog:@"[i] type1 打开成功，扫描 sel0-63 (中性 0x58 结构)..."];
 
-            uint8_t rin[0x58] = {0}; uint8_t rout[0x40] = {0}; size_t ros = sizeof(rout);
-            kern_return_t kr2 = IOConnectCallStructMethod(c, 2, rin, sizeof(rin), rout, &ros);
-
-            [self appendLog:[NSString stringWithFormat:@"    type%u OPEN  sel0=%@  sel2(new_res)=%@",
-                             type, [self krName:kr0], [self krName:kr2]]];
-            if (kr2 == kIOReturnSuccess)
-                [self appendLog:[NSString stringWithFormat:@"    [*] type%u: new_resource 可用! IOGPU 攻击面确认", type]];
-            IOConnectRelease(c);
+    int alive = 0;
+    for (int sel = 0; sel < 64; sel++) {
+        uint8_t inStruct[0x58] = {0};
+        uint8_t outStruct[0x40] = {0};
+        size_t outSize = sizeof(outStruct);
+        kern_return_t kr = IOConnectCallStructMethod(c, sel,
+                                                     inStruct, sizeof(inStruct), outStruct, &outSize);
+        if (kr != kIOReturnBadArgument && kr != kIOReturnUnsupported && kr != 0xe00002c2) {
+            [self appendLog:[NSString stringWithFormat:@"    sel%02d -> %@ (outSize=%zu)", sel, [self krName:kr], outSize]];
+            alive++;
         }
-        IOObjectRelease(svc);
     }
+    [self appendLog:[NSString stringWithFormat:@"[=] 非 BadArgument/Unsupported 的 selector 数: %d", alive]];
+    if (alive == 0)
+        [self appendLog:@"[!] type1 连接上所有 selector 均 BadArgument —— 该连接非 IOGPUDeviceUserClient"];
+    IOConnectRelease(c);
 }
 
 // ---------------- Phase B: 竞态 (高风险) ----------------
