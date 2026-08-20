@@ -40,23 +40,27 @@ static NSString *kLogPathName = @"IOGPU_result.log";
 #define IOGPU_SEL_GROUP_ADD_RESOURCES    17
 #define IOGPU_SEL_GROUP_REMOVE_RESOURCES 18
 
-// IOGPUNewResourceArgs (0x58 bytes, P0 confirmed)
+// IOGPUNewResourceArgs (0x58 bytes, 从 26.6 内核 0x9cebae8 反推)
 typedef struct __attribute__((packed)) {
-    uint32_t resource_type;         // 0x00
-    uint32_t flags;                 // 0x04
-    uint64_t options;               // 0x08
-    uint64_t client_virtual_addr;   // 0x10
-    uint64_t client_size;           // 0x18
-    uint64_t gpu_virtual_addr;      // 0x20
-    uint64_t reserved1;             // 0x28
-    uint64_t shared_resource_id;    // 0x30
-    uint64_t suballocation_offset;  // 0x38
-    uint32_t suballocation_size;    // 0x40
-    uint32_t alignment;             // 0x44
-    uint64_t private_data;          // 0x48
-    uint32_t extended_flags;        // 0x50
-    uint32_t padding;               // 0x54
-} IOGPUNewResourceArgs;             // total 0x58
+    uint32_t resource_type;     // 0x00
+    uint32_t version;           // 0x04
+    uint64_t options;           // 0x08
+    uint32_t f_0x10;            // 0x10
+    uint8_t  f_0x14;            // 0x14
+    uint8_t  f_0x15;            // 0x15 (bit3=模式)
+    uint16_t pad_0x16;
+    uint64_t ptr_0x18;          // 0x18 用户缓冲指针
+    uint64_t val_0x20;          // 0x20
+    uint64_t val_0x28;          // 0x28
+    uint32_t val_0x30;          // 0x30
+    uint32_t val_0x34;          // 0x34
+    uint32_t suballoc_off;      // 0x38
+    uint32_t suballoc_size;     // 0x3c
+    uint64_t val_0x40;          // 0x40
+    uint64_t size;              // 0x48
+    uint32_t flags_0x50;        // 0x50
+    uint32_t pad_0x54;          // 0x54
+} IOGPUNewResourceArgs;         // 0x58
 
 typedef struct {
     uint64_t resource_handle;
@@ -111,30 +115,41 @@ static pthread_mutex_t gLogLock = PTHREAD_MUTEX_INITIALIZER;
 
 // ---------------- Phase A: new_resource 可达性 ----------------
 - (void)testNewResourceReachability:(io_connect_t)connect {
-    [self appendLog:@"\n[*] Phase A: type1 全 selector 扫描 (0-63) - 映射真实方法空间"];
+    [self appendLog:@"\n[*] Phase A: 用修正后结构测 new_resource (sel2)"];
     io_service_t svc = IOServiceGetMatchingService(0, IOServiceMatching("AGXAcceleratorG17G"));
     if (!svc) { [self appendLog:@"[-] 服务不存在"]; return; }
     io_connect_t c = 0;
     kern_return_t okr = IOServiceOpen(svc, mach_task_self(), 1, &c);
     IOObjectRelease(svc);
     if (okr != kIOReturnSuccess) { [self appendLog:@"[-] type1 打开失败"]; return; }
-    [self appendLog:@"[i] type1 打开成功，扫描 sel0-63 (中性 0x58 结构)..."];
+    [self appendLog:@"[i] type1 打开成功，测 new_resource 修正结构..."];
 
-    int alive = 0;
-    for (int sel = 0; sel < 64; sel++) {
-        uint8_t inStruct[0x58] = {0};
-        uint8_t outStruct[0x40] = {0};
-        size_t outSize = sizeof(outStruct);
-        kern_return_t kr = IOConnectCallStructMethod(c, sel,
-                                                     inStruct, sizeof(inStruct), outStruct, &outSize);
-        if (kr != kIOReturnBadArgument && kr != kIOReturnUnsupported && kr != 0xe00002c2) {
-            [self appendLog:[NSString stringWithFormat:@"    sel%02d -> %@ (outSize=%zu)", sel, [self krName:kr], outSize]];
-            alive++;
-        }
+    // 用户缓冲
+    size_t bufsize = 0x10000;
+    void *buf = mmap(NULL, bufsize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (buf == MAP_FAILED) { [self appendLog:@"[-] mmap 失败"]; IOConnectRelease(c); return; }
+    memset(buf, 0, bufsize);
+
+    uint32_t types[] = {0, 0x80, 0x82, 3, 0x40};
+    for (int i = 0; i < 5; i++) {
+        IOGPUNewResourceArgs args;
+        memset(&args, 0, sizeof(args));
+        args.resource_type = types[i];
+        args.version = 0x0;
+        args.ptr_0x18 = (uint64_t)(uintptr_t)buf;
+        args.size = (uint64_t)bufsize;
+        args.suballoc_off = 0;
+        args.suballoc_size = (uint32_t)bufsize;
+
+        IOGPUNewResourceOutput out;
+        memset(&out, 0, sizeof(out));
+        size_t outSize = sizeof(out);
+        kern_return_t kr = IOConnectCallStructMethod(c, IOGPU_SEL_NEW_RESOURCE,
+                                                      &args, sizeof(args), &out, &outSize);
+        [self appendLog:[NSString stringWithFormat:@"[i] new_resource type=0x%x -> %@ (handle=0x%llx gpuva=0x%llx status=%u)",
+                         types[i], [self krName:kr], out.resource_handle, out.assigned_gpu_va, out.status]];
     }
-    [self appendLog:[NSString stringWithFormat:@"[=] 非 BadArgument/Unsupported 的 selector 数: %d", alive]];
-    if (alive == 0)
-        [self appendLog:@"[!] type1 连接上所有 selector 均 BadArgument —— 该连接非 IOGPUDeviceUserClient"];
+    munmap(buf, bufsize);
     IOConnectRelease(c);
 }
 
