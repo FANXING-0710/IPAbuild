@@ -167,10 +167,9 @@ static void *race_newres_thread(void *arg) {
         IOGPUNewResourceArgs args;
         memset(&args, 0, sizeof(args));
         args.resource_type = type;
-        args.client_virtual_addr = (uint64_t)(uintptr_t)buf;
-        args.client_size = (uint64_t)bufsize;
-        args.suballocation_size = (uint32_t)bufsize;
-        args.alignment = 0x4000;
+        args.ptr_0x18 = (uint64_t)(uintptr_t)buf;
+        args.size = (uint64_t)bufsize;
+        args.suballoc_size = (uint32_t)bufsize;
         IOGPUNewResourceOutput out;
         size_t outSize = sizeof(out);
         IOConnectCallStructMethod(gConn, IOGPU_SEL_NEW_RESOURCE, &args, sizeof(args), &out, &outSize);
